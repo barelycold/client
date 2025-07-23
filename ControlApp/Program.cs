@@ -1,4 +1,8 @@
+using ControlApp.Forms;
+using ControlApp.Models;
+using ControlApp.Services;
 using ControlApp.Subroutines;
+using ControlApp.Utils;
 
 namespace ControlApp;
 
@@ -9,6 +13,7 @@ internal static class Program {
     [STAThread]
     private static void Main()
     {
+        ConfigurationService.LoadConfiguration();
         // To customize application configuration such as set high DPI settings or default font,
         // see https://aka.ms/applicationconfiguration.
         ApplicationConfiguration.Initialize();
@@ -22,29 +27,106 @@ internal static class Program {
 
 public class MyCustomApplicationContext : ApplicationContext {
     private NotifyIcon trayIcon;
-    private MainWindow mainWindow = new MainWindow();
+    private MainWindow mainWindow = new();
     public MyCustomApplicationContext() {
+        // Asynchronously check the token and then decide what to show.
+        // We use a self-invoking async method to avoid making the constructor async.
+        Task.Run(async () =>
+        {
+            string storedToken = SecureTokenStorage.ReadToken();
+            UserAccount account = null;
+
+            if (!string.IsNullOrEmpty(storedToken))
+            {
+                // If a token exists, try to validate it and get the account info.
+                account = await ServerCommunicator.ValidateTokenAndGetAccountAsync();
+            }
+
+            if (account != null)
+            {
+                // Token is valid, initialize the session and show the main app
+                AccountService.Initialize(account);
+                // Fetch server configuration *after* the user is authenticated.
+                await ServerConfigService.InitializeAsync();
+                InitializeMainApp();
+            }
+            else
+            {
+                // No token, or token is invalid. Show the login form.
+                if (!string.IsNullOrEmpty(storedToken))
+                {
+                    SecureTokenStorage.DeleteToken(); // Clean up invalid token
+                }
+
+                using (LoginForm loginForm = new LoginForm())
+                {
+                    if (loginForm.ShowDialog() == DialogResult.OK)
+                    {
+                        // Login was successful, AccountService is already initialized.
+                        InitializeMainApp();
+                    }
+                    else
+                    {
+                        // Login failed or was cancelled.
+                        Exit(null, EventArgs.Empty);
+                    }
+                }
+            }
+        }).Wait(); // We wait here to ensure the UI thread starts properly
+    }
+
+    private void InitializeMainApp()
+    {
+        mainWindow = new MainWindow();
         trayIcon = new NotifyIcon();
         trayIcon.Icon = new Icon("App.ico");
         trayIcon.ContextMenuStrip = new ContextMenuStrip();
+        trayIcon.ContextMenuStrip.Items.Add("Logout", null, Logout); // Added Logout
         trayIcon.ContextMenuStrip.Items.Add("Exit", null, Exit);
         trayIcon.ContextMenuStrip.Items.Add("Open", null, Open);
         trayIcon.ContextMenuStrip.Items.Add("Panic", null, Panic);
         trayIcon.ContextMenuStrip.Items.Add("Subliminal", null, Subliminal);
         trayIcon.MouseClick += TrayIcon_MouseClick;
         trayIcon.Visible = true;
-    }
-
-    private void TrayIcon_MouseClick(object? sender, MouseEventArgs e) {
-        if (e.Button != MouseButtons.Left) return;
+        
+        // Show the main window now
         mainWindow.Show();
     }
 
-    private void Exit(object? sender, EventArgs e) {
-        // Hide tray icon, otherwise it will remain shown until user mouses over it
-        trayIcon.Visible = false;
-        mainWindow.Dispose();
+    private void TrayIcon_MouseClick(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        mainWindow?.Show();
+    }
 
+    private void Logout(object? sender, EventArgs e)
+    {
+        // Delete the token
+        SecureTokenStorage.DeleteToken();
+
+        // Hide the tray icon and close the main window
+        if (trayIcon != null)
+        {
+            trayIcon.Visible = false;
+        }
+        if (mainWindow != null)
+        {
+            // We need to use BeginInvoke to allow the current context menu to close before restarting
+            mainWindow.BeginInvoke(new Action(() =>
+            {
+                mainWindow.Close();
+                Application.Restart();
+            }));
+        } else {
+             Application.Restart();
+        }
+    }
+
+    private void Exit(object? sender, EventArgs e)
+    {
+        // Hide tray icon, otherwise it will remain shown until user mouses over it
+        if(trayIcon != null) trayIcon.Visible = false;
+        mainWindow.Dispose();
         Application.Exit();
     }
 
@@ -53,7 +135,7 @@ public class MyCustomApplicationContext : ApplicationContext {
     }
 
     private void Subliminal(object? sender, EventArgs e) {
-        SubLoop? loop = (SubLoop?) Utils.GetForm(typeof(SubLoop));
+        SubLoop? loop = (SubLoop?) Utilities.GetForm(typeof(SubLoop));
         if (loop != null) {
             loop.Visible = !loop.Visible;
         } else {
